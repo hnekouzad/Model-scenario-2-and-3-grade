@@ -1,0 +1,521 @@
+"""
+Deterministic EV Battery Reverse Logistics Model
+Based on Rim's revised formulation (October 3, 2025)
+2-GRADE BASELINE for initial validation
+Using Gurobi
+"""
+
+import gurobipy as gp
+from gurobipy import GRB
+import numpy as np
+import pandas as pd
+
+print("="*70)
+print("EV Battery Reverse Logistics - Deterministic Model")
+print("2 Grades: High, Low")
+print("Using Gurobi Optimizer")
+print("="*70)
+
+# ============================================================================
+# STEP 1: DEFINE SETS
+# ============================================================================
+
+# Forward chain
+I = [1, 2]          # Mines
+B = [1, 2]          # Battery manufacturers
+M = [1, 2]          # EV manufacturers
+K = [1, 2]          # Retailers
+C = [1, 2]          # Primary markets
+
+# Reverse chain (single nodes)
+F = [1]             # Collection center
+E = [1]             # Refurb/repair center
+R = [1]             # Recycling center
+D = [1]             # Disposal center
+S = [1]             # Secondary market
+
+# Grades: 1=High (refurbishable), 2=Low (recycle/dispose only)
+G = [1, 2]
+
+print("\nSets defined: 2 grades for baseline validation")
+
+# ============================================================================
+# STEP 2: DEFINE PARAMETERS (VALIDATED WORKING VALUES)
+# ============================================================================
+
+# --- Demand ---
+D_EV = {1: 300, 2: 400}  # Primary EV demand
+D_SL = 100               # Secondary demand
+
+# --- Technical Parameters ---
+R_c = {1: 0.80, 2: 0.75}    # Return rates by market
+
+# Grade share: 60% high, 40% low
+theta_cg = {
+    (1, 1): 0.60, (1, 2): 0.40,
+    (2, 1): 0.60, (2, 2): 0.40
+}
+
+# Eligibility (2-grade: only refurb, NO repair)
+beta_ref = {1: 1, 2: 0}     # Only grade 1 refurbishable
+beta_rep = {1: 0, 2: 0}     # No repair in 2-grade model
+
+alpha = 0.90                # Processing budget (90% processable)
+
+# Recovery rates
+r_ref = {1: 0.90, 2: 0.0}   # Only grade 1 can be refurbished
+r_rep = {1: 0.0, 2: 0.0}    # No repair
+r_rec = 0.92                # Recycling yield (kg/kg)
+
+# Mass parameters
+mu_g = {1: 500, 2: 450}     # kg per returned battery by grade
+lambda_b = {1: 480, 2: 480} # kg per new battery
+
+# --- Economic Parameters ---
+p_EV_kc = {(k, c): 40000 for k in K for c in C}  # EV price
+p_SL = 30000  # Refurb battery price
+
+c_raw_i = {1: 15, 2: 15}  # Virgin material cost ($/kg)
+
+# Processing costs ($/unit)
+c_proc_b = {1: 100, 2: 100}
+c_proc_m = {1: 5000, 2: 5000}
+c_proc_e = 800   # Refurb/repair
+c_proc_r = 400   # Recycling
+c_proc_d = 150   # Disposal
+
+c_diag = 50  # Diagnostic cost ($/unit)
+
+# Transport costs ($/kg for mass flows, $/unit for unit flows)
+c_tr_ib = {(i, b): 0.5 for i in I for b in B}  # $/kg
+c_tr_rb = {b: 0.5 for b in B}                   # $/kg
+
+c_tr_bm = {(b, m): 20 for b in B for m in M}
+c_tr_mk = {(m, k): 15 for m in M for k in K}
+c_tr_kc = {(k, c): 10 for k in K for c in C}
+c_tr_cf = {c: 30 for c in C}
+c_tr_fe = 25
+c_tr_fr = 20
+c_tr_fd = 15
+c_tr_es = 30
+
+# Shortage penalties
+pi_pri = 50000   # Primary shortage penalty
+pi_sec = 100000  # Secondary shortage penalty
+
+# --- Capacities ---
+Cap_kg_i = {1: 500000, 2: 500000}  # Mine capacity (kg)
+
+Cap_u_b = {1: 3000, 2: 3000}     # Battery manufacturer
+Cap_u_m = {1: 3000, 2: 3000}     # EV manufacturer
+Cap_u_k = {1: 2000, 2: 2000}     # Retailer
+
+Cap_u_f = 5000                    # Collection
+Cap_u_e = 2000                    # Refurb/repair
+Cap_u_r = 3000                    # Recycling
+Cap_u_d = 5000                    # Disposal
+
+print("Parameters defined with 2 grades")
+
+# ============================================================================
+# STEP 3: CREATE MODEL
+# ============================================================================
+
+model = gp.Model("EV_Battery_RL_2Grade")
+model.setParam('OutputFlag', 1)  # Show solver output
+
+print("\nCreating decision variables...")
+
+# --- Forward Chain Variables ---
+Q_raw = model.addVars(I, B, lb=0, name="Q_raw")         # kg
+Q_bat = model.addVars(B, M, lb=0, name="Q_bat")         # units
+Q_EV = model.addVars(M, K, lb=0, name="Q_EV")           # units
+Q_sale = model.addVars(K, C, lb=0, name="Q_sale")       # units
+U_EV = model.addVars(C, lb=0, name="U_EV")              # units
+
+# --- Reverse Chain Variables ---
+Q_ret = model.addVars(C, G, lb=0, name="Q_ret")         # units
+Q_ref = model.addVars(G, lb=0, name="Q_ref")            # units
+Q_rep = model.addVars(G, lb=0, name="Q_rep")            # units
+Q_rec = model.addVars(G, lb=0, name="Q_rec")            # units
+Q_dis = model.addVars(G, lb=0, name="Q_dis")            # units
+Q_SL = model.addVar(lb=0, name="Q_SL")                  # units
+Q_rmb = model.addVars(B, lb=0, name="Q_rmb")            # kg
+U_SL = model.addVar(lb=0, name="U_SL")                  # units
+
+print(f"Variables created: {model.NumVars} total")
+
+# ============================================================================
+# STEP 4: OBJECTIVE FUNCTION
+# ============================================================================
+
+print("\nSetting objective function...")
+
+# Revenue
+revenue_primary = gp.quicksum(p_EV_kc[k, c] * Q_sale[k, c] 
+                              for k in K for c in C)
+revenue_secondary = p_SL * Q_SL
+
+# Costs - Raw material
+cost_raw = gp.quicksum((c_raw_i[i] + c_tr_ib[i, b]) * Q_raw[i, b] 
+                       for i in I for b in B)
+
+# Costs - Processing
+cost_proc_battery = gp.quicksum(c_proc_b[b] * Q_bat[b, m] 
+                                for b in B for m in M)
+cost_proc_ev = gp.quicksum(c_proc_m[m] * Q_EV[m, k] 
+                           for m in M for k in K)
+
+# Costs - Forward transport
+cost_tr_forward = (gp.quicksum(c_tr_bm[b, m] * Q_bat[b, m] for b in B for m in M) +
+                   gp.quicksum(c_tr_mk[m, k] * Q_EV[m, k] for m in M for k in K) +
+                   gp.quicksum(c_tr_kc[k, c] * Q_sale[k, c] for k in K for c in C))
+
+# Costs - Reverse diagnostics and transport
+cost_diag = c_diag * gp.quicksum(Q_ret[c, g] for c in C for g in G)
+cost_tr_collection = gp.quicksum(c_tr_cf[c] * Q_ret[c, g] for c in C for g in G)
+
+# Costs - Reverse processing
+cost_proc_refurb = (c_proc_e + c_tr_fe) * gp.quicksum(Q_ref[g] + Q_rep[g] for g in G)
+cost_proc_recycle = (c_proc_r + c_tr_fr) * gp.quicksum(Q_rec[g] for g in G)
+cost_proc_disposal = (c_proc_d + c_tr_fd) * gp.quicksum(Q_dis[g] for g in G)
+
+# Costs - Secondary transport
+cost_tr_secondary = c_tr_es * Q_SL
+cost_tr_recycled = gp.quicksum(c_tr_rb[b] * Q_rmb[b] for b in B)
+
+# Penalties
+penalty_primary = pi_pri * gp.quicksum(U_EV[c] for c in C)
+penalty_secondary = pi_sec * U_SL
+
+# Total objective
+profit = (revenue_primary + revenue_secondary 
+          - cost_raw - cost_proc_battery - cost_proc_ev
+          - cost_tr_forward - cost_diag - cost_tr_collection
+          - cost_proc_refurb - cost_proc_recycle - cost_proc_disposal
+          - cost_tr_secondary - cost_tr_recycled
+          - penalty_primary - penalty_secondary)
+
+model.setObjective(profit, GRB.MAXIMIZE)
+
+print("Objective function set: Profit maximization")
+
+# ============================================================================
+# STEP 5: CONSTRAINTS (CORRECTED VERSION)
+# ============================================================================
+
+print("\nAdding constraints...")
+
+# --- Forward Chain Constraints ---
+
+# C1: Battery production capacity
+for b in B:
+    model.addConstr(gp.quicksum(Q_bat[b, m] for m in M) <= Cap_u_b[b],
+                    name=f"C1_BatCap_{b}")
+
+# C2: Material circularity (virgin + recycled)
+for b in B:
+    model.addConstr(
+        gp.quicksum(Q_bat[b, m] for m in M) <= 
+        (1/lambda_b[b]) * (gp.quicksum(Q_raw[i, b] for i in I) + Q_rmb[b]),
+        name=f"C2_MatCirc_{b}")
+
+# C3: EV assembly capacity
+for m in M:
+    model.addConstr(gp.quicksum(Q_EV[m, k] for k in K) <= Cap_u_m[m],
+                    name=f"C3_EVCap_{m}")
+
+# C4: EV assembly balance
+for m in M:
+    model.addConstr(gp.quicksum(Q_EV[m, k] for k in K) <= 
+                    gp.quicksum(Q_bat[b, m] for b in B),
+                    name=f"C4_EVBal_{m}")
+
+# C5: Retailer capacity
+for k in K:
+    model.addConstr(gp.quicksum(Q_sale[k, c] for c in C) <= Cap_u_k[k],
+                    name=f"C5_RetCap_{k}")
+
+# C6: Retailer balance
+for k in K:
+    model.addConstr(gp.quicksum(Q_sale[k, c] for c in C) <= 
+                    gp.quicksum(Q_EV[m, k] for m in M),
+                    name=f"C6_RetBal_{k}")
+
+# C7: Primary demand satisfaction
+for c in C:
+    model.addConstr(gp.quicksum(Q_sale[k, c] for k in K) + U_EV[c] == D_EV[c],
+                    name=f"C7_PrimDem_{c}")
+
+# --- Reverse Chain Constraints ---
+
+# C8: Returns generation by grade
+for c in C:
+    for g in G:
+        model.addConstr(
+            Q_ret[c, g] == R_c[c] * theta_cg[c, g] * gp.quicksum(Q_sale[k, c] for k in K),
+            name=f"C8_Returns_{c}_{g}")
+
+# C9: Collection balance by grade
+for g in G:
+    model.addConstr(
+        gp.quicksum(Q_ret[c, g] for c in C) == 
+        Q_ref[g] + Q_rep[g] + Q_rec[g] + Q_dis[g],
+        name=f"C9_ColBal_{g}")
+
+# ============================================================================
+# C10-C12: CORRECTED CONSTRAINTS (RIM'S REVISED VERSION)
+# ============================================================================
+
+# C10: Processing budget (AGGREGATE - applies to ALL processing)
+model.addConstr(
+    gp.quicksum(Q_ref[g] + Q_rep[g] + Q_rec[g] for g in G) <= 
+    alpha * gp.quicksum(Q_ret[c, g] for c in C for g in G),
+    name="C10_ProcessingBudget")
+
+# C11: Refurbishment eligibility by grade (NO alpha here)
+for g in G:
+    model.addConstr(
+        Q_ref[g] <= beta_ref[g] * gp.quicksum(Q_ret[c, g] for c in C),
+        name=f"C11_RefurbElig_{g}")
+
+# C12: Repair eligibility by grade (NO alpha here)
+for g in G:
+    model.addConstr(
+        Q_rep[g] <= beta_rep[g] * gp.quicksum(Q_ret[c, g] for c in C),
+        name=f"C12_RepairElig_{g}")
+
+# ============================================================================
+
+# C13: Secondary output (EQUALITY - CRITICAL)
+model.addConstr(
+    Q_SL == gp.quicksum(r_ref[g] * Q_ref[g] + r_rep[g] * Q_rep[g] for g in G),
+    name="C13_SecOutput")
+
+# C14: Recycling material recovery (EQUALITY)
+model.addConstr(
+    gp.quicksum(Q_rmb[b] for b in B) == 
+    r_rec * gp.quicksum(mu_g[g] * Q_rec[g] for g in G),
+    name="C14_RecMat")
+
+# C15: Secondary demand satisfaction
+model.addConstr(Q_SL + U_SL == D_SL, name="C15_SecDem")
+
+# --- Capacity Constraints ---
+
+# C16: Mine capacity
+for i in I:
+    model.addConstr(gp.quicksum(Q_raw[i, b] for b in B) <= Cap_kg_i[i],
+                    name=f"C16_MineCap_{i}")
+
+# C17: Collection capacity
+model.addConstr(
+    gp.quicksum(Q_ret[c, g] for c in C for g in G) <= Cap_u_f,
+    name="C17_ColCap")
+
+# C18: Refurb/repair capacity
+model.addConstr(
+    gp.quicksum(Q_ref[g] + Q_rep[g] for g in G) <= Cap_u_e,
+    name="C18_RefurbCap")
+
+# C19: Recycling capacity
+model.addConstr(
+    gp.quicksum(Q_rec[g] for g in G) <= Cap_u_r,
+    name="C19_RecCap")
+
+# C20: Disposal capacity
+model.addConstr(
+    gp.quicksum(Q_dis[g] for g in G) <= Cap_u_d,
+    name="C20_DispCap")
+
+print(f"Constraints added: {model.NumConstrs} total")
+
+# ============================================================================
+# STEP 6: SOLVE MODEL
+# ============================================================================
+
+print("\n" + "="*70)
+print("SOLVING MODEL")
+print("="*70)
+
+model.optimize()
+
+# ============================================================================
+# STEP 7: DISPLAY RESULTS
+# ============================================================================
+
+if model.status == GRB.OPTIMAL:
+    print("\n" + "="*70)
+    print("OPTIMAL SOLUTION FOUND")
+    print("="*70)
+    
+    print(f"\nOptimal Profit: ${model.ObjVal:,.2f}")
+    
+    # --- Revenue Breakdown ---
+    print("\n" + "-"*70)
+    print("REVENUE")
+    print("-"*70)
+    rev_pri = sum(p_EV_kc[k, c] * Q_sale[k, c].X for k in K for c in C)
+    rev_sec = p_SL * Q_SL.X
+    print(f"Primary EV sales:        ${rev_pri:,.2f}")
+    print(f"Secondary battery sales: ${rev_sec:,.2f}")
+    print(f"Total Revenue:           ${rev_pri + rev_sec:,.2f}")
+    
+    # --- Key Flows ---
+    print("\n" + "-"*70)
+    print("KEY FLOWS")
+    print("-"*70)
+    
+    evs_produced = sum(Q_bat[b, m].X for b in B for m in M)
+    evs_sold = sum(Q_sale[k, c].X for k in K for c in C)
+    batteries_returned = sum(Q_ret[c, g].X for c in C for g in G)
+    
+    print(f"EVs produced:            {evs_produced:>8,.0f} units")
+    print(f"EVs sold:                {evs_sold:>8,.0f} units")
+    print(f"Batteries returned:      {batteries_returned:>8,.0f} units")
+    
+    print(f"\nGrade Distribution of Returns:")
+    for g in G:
+        returns_g = sum(Q_ret[c, g].X for c in C)
+        pct = 100 * returns_g / batteries_returned if batteries_returned > 0 else 0
+        grade_name = {1: "High", 2: "Low"}[g]
+        print(f"  Grade {g} ({grade_name}):      {returns_g:>8,.0f} units ({pct:.1f}%)")
+    
+    print(f"\nReverse Flow Routing:")
+    total_refurb = sum(Q_ref[g].X for g in G)
+    total_repair = sum(Q_rep[g].X for g in G)
+    total_recycle = sum(Q_rec[g].X for g in G)
+    total_dispose = sum(Q_dis[g].X for g in G)
+    
+    print(f"  Refurbished:           {total_refurb:>8,.0f} units ({100*total_refurb/batteries_returned:.1f}%)")
+    print(f"  Repaired:              {total_repair:>8,.0f} units ({100*total_repair/batteries_returned:.1f}%)")
+    print(f"  Recycled:              {total_recycle:>8,.0f} units ({100*total_recycle/batteries_returned:.1f}%)")
+    print(f"  Disposed:              {total_dispose:>8,.0f} units ({100*total_dispose/batteries_returned:.1f}%)")
+    
+    # By grade breakdown
+    print(f"\nDetailed Routing by Grade:")
+    for g in G:
+        returns_g = sum(Q_ret[c, g].X for c in C)
+        if returns_g > 0.1:
+            grade_name = {1: "High", 2: "Low"}[g]
+            print(f"\n  Grade {g} ({grade_name}) - {returns_g:.0f} batteries:")
+            print(f"    Refurbished:  {Q_ref[g].X:>8,.0f} ({100*Q_ref[g].X/returns_g:.1f}%)")
+            print(f"    Repaired:     {Q_rep[g].X:>8,.0f} ({100*Q_rep[g].X/returns_g:.1f}%)")
+            print(f"    Recycled:     {Q_rec[g].X:>8,.0f} ({100*Q_rec[g].X/returns_g:.1f}%)")
+            print(f"    Disposed:     {Q_dis[g].X:>8,.0f} ({100*Q_dis[g].X/returns_g:.1f}%)")
+    
+    print(f"\nSecondary Market:")
+    print(f"  Refurb batteries sold: {Q_SL.X:>8,.0f} units")
+    print(f"  Unmet demand:          {U_SL.X:>8,.0f} units")
+    print(f"  Service level:         {100*Q_SL.X/D_SL:>8.1f}%")
+    
+    print(f"\nMaterial Circularity:")
+    virgin_kg = sum(Q_raw[i, b].X for i in I for b in B)
+    recycled_kg = sum(Q_rmb[b].X for b in B)
+    total_kg = virgin_kg + recycled_kg
+    print(f"  Virgin materials:      {virgin_kg:>8,.0f} kg")
+    print(f"  Recycled materials:    {recycled_kg:>8,.0f} kg")
+    if total_kg > 0:
+        print(f"  Recycled fraction:     {100*recycled_kg/total_kg:>8.1f}%")
+    
+    # ========================================================================
+    # VALIDATION CHECKS
+    # ========================================================================
+    
+    print("\n" + "="*70)
+    print("VALIDATION CHECKS")
+    print("="*70)
+    
+    checks_passed = 0
+    checks_total = 0
+    
+    # Check 1: Material balance
+    checks_total += 1
+    batteries_from_material = total_kg / np.mean(list(lambda_b.values()))
+    if abs(evs_produced - batteries_from_material) < 1:
+        print(f"✓ Material balance: {evs_produced:.0f} ≈ {batteries_from_material:.0f}")
+        checks_passed += 1
+    else:
+        print(f"✗ Material balance failed: {evs_produced:.0f} ≠ {batteries_from_material:.0f}")
+    
+    # Check 2: Grade distribution
+    checks_total += 1
+    grade_check_pass = True
+    for c in C:
+        total_returns_c = sum(Q_ret[c, g].X for g in G)
+        if total_returns_c > 0.1:
+            for g in G:
+                actual_share = Q_ret[c, g].X / total_returns_c
+                expected_share = theta_cg[c, g]
+                if abs(actual_share - expected_share) > 0.01:
+                    print(f"✗ Grade distribution failed: market {c}, grade {g}")
+                    grade_check_pass = False
+    if grade_check_pass:
+        print("✓ Grade distributions match θ_cg parameters")
+        checks_passed += 1
+    
+    # Check 3: Processing budget
+    checks_total += 1
+    processed = total_refurb + total_repair + total_recycle
+    budget_limit = alpha * batteries_returned
+    if processed <= budget_limit + 0.1:
+        print(f"✓ Processing budget: {processed:.0f} ≤ {budget_limit:.0f} (α={alpha})")
+        checks_passed += 1
+    else:
+        print(f"✗ Processing budget violated: {processed:.0f} > {budget_limit:.0f}")
+    
+    # Check 4: Flow conservation
+    checks_total += 1
+    flow_conserved = True
+    for g in G:
+        inflow = sum(Q_ret[c, g].X for c in C)
+        outflow = Q_ref[g].X + Q_rep[g].X + Q_rec[g].X + Q_dis[g].X
+        if abs(inflow - outflow) > 0.1:
+            print(f"✗ Flow conservation failed for grade {g}: {inflow:.0f} ≠ {outflow:.0f}")
+            flow_conserved = False
+    if flow_conserved:
+        print("✓ Flow conservation satisfied (C9)")
+        checks_passed += 1
+    
+    # Check 5: Eligibility constraints
+    checks_total += 1
+    eligibility_pass = True
+    for g in G:
+        returns_g = sum(Q_ret[c, g].X for c in C)
+        max_refurb = beta_ref[g] * returns_g
+        max_repair = beta_rep[g] * returns_g
+        if Q_ref[g].X > max_refurb + 0.1:
+            print(f"✗ Refurb eligibility violated for grade {g}")
+            eligibility_pass = False
+        if Q_rep[g].X > max_repair + 0.1:
+            print(f"✗ Repair eligibility violated for grade {g}")
+            eligibility_pass = False
+    if eligibility_pass:
+        print("✓ Eligibility constraints satisfied (C11-C12)")
+        checks_passed += 1
+    
+    print(f"\nValidation Summary: {checks_passed}/{checks_total} checks passed")
+    
+    if checks_passed == checks_total:
+        print("\n✓✓✓ ALL VALIDATION CHECKS PASSED ✓✓✓")
+        print("\n" + "="*70)
+        print("2-GRADE BASELINE MODEL VALIDATED")
+        print("Ready to scale to 3-grade extended model")
+        print("="*70)
+    else:
+        print(f"\n⚠ WARNING: {checks_total - checks_passed} check(s) failed")
+
+elif model.status == GRB.INFEASIBLE:
+    print("\n⚠ MODEL IS INFEASIBLE")
+    print("Computing IIS...")
+    model.computeIIS()
+    print("\nConflicting constraints:")
+    for c in model.getConstrs():
+        if c.IISConstr:
+            print(f"  {c.ConstrName}")
+else:
+    print(f"\nOptimization ended with status {model.status}")
+
+print("\n" + "="*70)
+print("SIMULATION COMPLETE")
+print("="*70)
