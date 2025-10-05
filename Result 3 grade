@@ -1,0 +1,122 @@
+======================================================================
+EV Battery Reverse Logistics - Deterministic Model
+3 Grades: High, Medium, Low
+Using Gurobi Optimizer
+======================================================================
+
+Sets defined: 3 grades for validation
+Parameters defined with 3 grades
+Set parameter OutputFlag to value 1
+
+Creating decision variables...
+Variables created: 0 total
+
+Setting objective function...
+Objective function set: Profit maximization
+
+Adding constraints...
+Constraints added: 0 total
+
+======================================================================
+SOLVING MODEL
+======================================================================
+Gurobi Optimizer version 12.0.2 build v12.0.2rc0 (win64 - Windows 11.0 (26100.2))
+
+CPU model: 12th Gen Intel(R) Core(TM) i7-12700H, instruction set [SSE2|AVX|AVX2]
+Thread count: 14 physical cores, 20 logical processors, using up to 20 threads
+
+Academic license 2717820 - for non-commercial use only - registered to ha___@ens.etsmtl.ca
+Optimize a model with 39 rows, 40 columns and 137 nonzeros
+Model fingerprint: 0x04afc682
+Coefficient statistics:
+  Matrix range     [2e-03, 5e+02]
+  Objective range  [5e-01, 1e+05]
+  Bounds range     [0e+00, 0e+00]
+  RHS range        [1e+02, 5e+05]
+Presolve removed 17 rows and 11 columns
+Presolve time: 0.01s
+Presolved: 22 rows, 29 columns, 91 nonzeros
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+       0    3.0946800e+07   1.676755e+02   0.000000e+00      0s
+      16    2.4361223e+07   0.000000e+00   0.000000e+00      0s
+
+Solved in 16 iterations and 0.02 seconds (0.00 work units)
+Optimal objective  2.436122333e+07
+
+======================================================================
+OPTIMAL SOLUTION FOUND
+======================================================================
+
+Optimal Profit: $24,361,223.33
+
+----------------------------------------------------------------------
+REVENUE
+----------------------------------------------------------------------
+Primary EV sales:        $28,000,000.00
+Secondary battery sales: $3,000,000.00
+Total Revenue:           $31,000,000.00
+
+----------------------------------------------------------------------
+KEY FLOWS
+----------------------------------------------------------------------
+EVs produced:                 700 units
+EVs sold:                     700 units
+Batteries returned:           540 units
+
+Grade Distribution of Returns:
+  Grade 1 (High):           162 units (30.0%)
+  Grade 2 (Medium):           270 units (50.0%)
+  Grade 3 (Low):           108 units (20.0%)
+
+Reverse Flow Routing:
+  Refurbished:                111 units (20.6%)
+  Repaired:                     0 units (0.0%)
+  Recycled:                   375 units (69.4%)
+  Disposed:                    54 units (10.0%)
+
+Detailed Routing by Grade:
+
+  Grade 1 (High) - 162 batteries:
+    Refurbished:       111 (68.6%)
+    Repaired:            0 (0.0%)
+    Recycled:           51 (31.4%)
+    Disposed:            0 (0.0%)
+
+  Grade 2 (Medium) - 270 batteries:
+    Refurbished:         0 (0.0%)
+    Repaired:            0 (0.0%)
+    Recycled:          270 (100.0%)
+    Disposed:            0 (0.0%)
+
+  Grade 3 (Low) - 108 batteries:
+    Refurbished:         0 (0.0%)
+    Repaired:            0 (0.0%)
+    Recycled:           54 (50.0%)
+    Disposed:           54 (50.0%)
+
+Secondary Market:
+  Refurb batteries sold:      100 units
+  Unmet demand:                 0 units
+  Service level:            100.0%
+
+Material Circularity:
+  Virgin materials:       171,003 kg
+  Recycled materials:     164,997 kg
+  Recycled fraction:         49.1%
+
+======================================================================
+VALIDATION CHECKS
+======================================================================
+✓ Material balance: 700 ≈ 700
+✓ Grade distributions match θ_cg parameters
+✓ Processing budget: 486 ≤ 486 (α=0.9)
+✓ Flow conservation satisfied (C9)
+✓ Eligibility constraints satisfied (C11-C12)
+
+Validation Summary: 5/5 checks passed
+
+✓✓✓ ALL VALIDATION CHECKS PASSED ✓✓✓
+
+======================================================================
+SIMULATION COMPLETE
